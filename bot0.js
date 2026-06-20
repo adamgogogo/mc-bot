@@ -6,7 +6,7 @@ const Vec3 = require('vec3')
 
 const bot = mineflayer.createBot({
   host: '127.0.0.1',
-  port: 59811,
+  port: 65237,
   username: 'CodexBot',
   version: '1.20.4'
 })
