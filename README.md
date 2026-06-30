@@ -45,3 +45,11 @@ craft planks - 手动合成木板
 /give CodexBot oak_door 64
 /give CodexBot chest 64
 /give CodexBot red_bed 64
+
+## codewhale
+node -v
+v22.19.0
+npm install -g codewhale --verbose
+codewhale auth set --provider deepseek
+Enter API key for deepseek: sk-********
+saved API key for deepseek to /Users/****/.codewhale/config.toml and file-based (~/.codewhale/secrets/)
