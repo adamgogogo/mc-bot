@@ -631,6 +631,290 @@ function getBlockAction(blockName, targetName) {
 
 console.log('')
 
+// ─── 房屋碰撞检测测试 ──────────────────────────
+console.log('🏘️  测试房屋碰撞检测 (isOverlapping)')
+
+const HOUSE_W = 7
+const HOUSE_D = 7
+const HOUSE_GAP = 1
+
+function isOverlapping(builtHouses, candOrigin, w = HOUSE_W, d = HOUSE_D, gap = HOUSE_GAP) {
+  const candMinX = candOrigin.x
+  const candMaxX = candOrigin.x + w - 1
+  const candMinZ = candOrigin.z
+  const candMaxZ = candOrigin.z + d - 1
+
+  for (const h of builtHouses) {
+    const o = h.origin
+    const hMinX = o.x
+    const hMaxX = o.x + w - 1
+    const hMinZ = o.z
+    const hMaxZ = o.z + d - 1
+
+    const overlapX = (candMinX <= hMaxX + gap) && (candMaxX + gap >= hMinX)
+    const overlapZ = (candMinZ <= hMaxZ + gap) && (candMaxZ + gap >= hMinZ)
+    if (overlapX && overlapZ) return true
+  }
+  return false
+}
+
+// 场景：空列表不重叠
+{
+  const built = []
+  const cand = new Vec3(0, 60, 0)
+  assert(!isOverlapping(built, cand), '空已建列表 → 不重叠')
+}
+
+// 场景：同一位置重叠
+{
+  const built = [{ origin: { x: 0, y: 60, z: 0 } }]
+  const cand = new Vec3(0, 60, 0)
+  assert(isOverlapping(built, cand), '同一位置 → 重叠')
+}
+
+// 场景：部分重叠（x 方向偏移 3 格）
+{
+  const built = [{ origin: { x: 0, y: 60, z: 0 } }]
+  const cand = new Vec3(3, 60, 0)
+  assert(isOverlapping(built, cand), 'x 偏移 3 格 → 重叠（7x7 矩形相交）')
+}
+
+// 场景：刚好相邻（间距 = HOUSE_GAP，边界贴合但有间隙）
+{
+  const built = [{ origin: { x: 0, y: 60, z: 0 } }]
+  // 已有房子占 x: 0~6,z: 0~6；新房子 x: 8,z: 0 → x 方向间距 = 8-0-W=8-7=1=gap
+  const cand1 = new Vec3(8, 60, 0)   // x 方向紧邻，间距 = 8 - 6 = 2 > gap=1 ✓
+  assert(!isOverlapping(built, cand1), 'x 偏移 8 → 不重叠（间距 ≥ gap）')
+  
+  // x: 7 → 间距 = 7-6 = 1 = gap → 含间隙检测判定为重叠
+  const cand2 = new Vec3(7, 60, 0)
+  assert(isOverlapping(built, cand2), 'x 偏移 7 → 重叠（间距 = gap）')
+}
+
+// 场景：z 方向偏移
+{
+  const built = [{ origin: { x: 0, y: 60, z: 0 } }]
+  const cand1 = new Vec3(0, 60, 8)
+  assert(!isOverlapping(built, cand1), 'z 偏移 8 → 不重叠')
+  const cand2 = new Vec3(0, 60, 7)
+  assert(isOverlapping(built, cand2), 'z 偏移 7 → 重叠（间距 = gap）')
+}
+
+// 场景：对角位置不重叠
+{
+  const built = [{ origin: { x: 0, y: 60, z: 0 } }]
+  const cand = new Vec3(8, 60, 8)
+  assert(!isOverlapping(built, cand), '对角 (8,8) → 不重叠')
+}
+
+// 场景：多栋已建房屋中检查
+{
+  const built = [
+    { origin: { x: 0, y: 60, z: 0 } },
+    { origin: { x: 10, y: 62, z: 0 } },
+    { origin: { x: 0, y: 58, z: 10 } },
+  ]
+  // 与第二栋重叠
+  assert(isOverlapping(built, new Vec3(10, 60, 0)), '多栋列表 → 与第二栋重叠')
+  // 与第三栋不重叠但位置接近
+  assert(!isOverlapping(built, new Vec3(0, 60, 20)), '多栋列表 → 不重叠（z=20 距第三栋 z=10 有间隙）')
+  // 在间隙中
+  assert(!isOverlapping(built, new Vec3(8, 60, 8)), '多栋列表 → 位于三栋间隙中不重叠')
+}
+
+// 场景：y 不同但 x-z 重叠
+{
+  const built = [{ origin: { x: 0, y: 60, z: 0 } }]
+  const cand = new Vec3(0, 70, 0)  // y 相差 10，但 x-z 相同
+  assert(isOverlapping(built, cand), 'x-z 相同但 y 不同 → 仍重叠（只看 x-z 投影）')
+}
+
+console.log('')
+
+// ─── 随机位置搜索测试 ──────────────────────────
+console.log('🎲 测试随机位置搜索 (findRandomBuildSpot)')
+
+function findRandomBuildSpot(builtHouses, blockMap, centerX, centerY, centerZ, radius = 20, maxAttempts = 200) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const angle = Math.random() * 2 * Math.PI
+    const dist = Math.sqrt(Math.random()) * radius
+    const dx = Math.round(Math.cos(angle) * dist)
+    const dz = Math.round(Math.sin(angle) * dist)
+
+    const cx = centerX + dx
+    const cz = centerZ + dz
+    const cy = centerY + Math.floor(Math.random() * 9) - 4
+
+    const cand = new Vec3(cx, cy, cz)
+
+    // 碰撞检测
+    if (isOverlapping(builtHouses, cand)) continue
+
+    // 地面检测
+    const corners = [
+      cand.offset(0, -1, 0),
+      cand.offset(HOUSE_W - 1, -1, 0),
+      cand.offset(0, -1, HOUSE_D - 1),
+      cand.offset(HOUSE_W - 1, -1, HOUSE_D - 1),
+      cand.offset(Math.floor(HOUSE_W / 2), -1, Math.floor(HOUSE_D / 2))
+    ]
+    let solidGround = true
+    for (const corner of corners) {
+      const key = `${corner.x},${corner.y},${corner.z}`
+      const block = blockMap[key]
+      if (!block || block.name === 'air' || block.name === 'water' || block.name === 'lava') {
+        solidGround = false
+        break
+      }
+    }
+    if (!solidGround) continue
+
+    // 水下检查：屋顶上方（y=5）有水覆盖
+    let isUnderwater = false
+    for (let x = 0; x < HOUSE_W && !isUnderwater; x++) {
+      for (let z = 0; z < HOUSE_D && !isUnderwater; z++) {
+        const key = `${cand.x + x},${cand.y + 5},${cand.z + z}`
+        const b = blockMap[key]
+        if (b && b.name === 'water') isUnderwater = true
+      }
+    }
+    if (isUnderwater) continue
+
+    // 地下/洞穴检查：中心正上方连续固体天花板
+    const centerX2 = cand.x + Math.floor(HOUSE_W / 2)
+    const centerZ2 = cand.z + Math.floor(HOUSE_D / 2)
+    let solidAbove = 0
+    for (let dy = 5; dy <= 12; dy++) {
+      const key = `${centerX2},${cand.y + dy},${centerZ2}`
+      const b = blockMap[key]
+      if (b && b.name !== 'air' && !b.name.includes('leaves')) {
+        solidAbove++
+        if (solidAbove >= 3) break
+      } else {
+        break
+      }
+    }
+    if (solidAbove >= 3) continue
+
+    return cand
+  }
+  return null
+}
+
+// 场景：空地 → 应找到位置
+{
+  const blockMap = {}
+  // 在中心周围铺上实心地面
+  for (let x = -30; x <= 30; x++) {
+    for (let z = -30; z <= 30; z++) {
+      blockMap[`${x},59,${z}`] = block('grass_block')
+    }
+  }
+  const spot = findRandomBuildSpot([], blockMap, 0, 60, 0, 20, 200)
+  assert(spot !== null, '空地 → 成功找到位置')
+  // 验证在半径内
+  const dist = Math.sqrt((spot.x - 0) ** 2 + (spot.z - 0) ** 2)
+  assert(dist <= 21, '找到的位置在搜索半径内')
+}
+
+// 场景：已有一栋房子，第二栋应找到不重叠的位置
+{
+  const blockMap = {}
+  for (let x = -30; x <= 30; x++) {
+    for (let z = -30; z <= 30; z++) {
+      blockMap[`${x},59,${z}`] = block('grass_block')
+    }
+  }
+  const built = [{ origin: { x: 0, y: 60, z: 0 } }]
+  // 清除第一栋房子下方的地面（让它占位但地面还在）
+  // 实际上我们只需要确保搜索不会返回重叠位置
+  
+  const spot = findRandomBuildSpot(built, blockMap, 0, 60, 0, 20, 200)
+  assert(spot !== null, '已有 1 栋 → 仍能找到位置')
+  assert(!isOverlapping(built, spot), '找到的位置与已有房子不重叠')
+}
+
+// 场景：全部被占满 → 返回 null
+{
+  const blockMap = {}
+  // 仅有中心一小块地面
+  for (let x = -2; x <= 2; x++) {
+    for (let z = -2; z <= 2; z++) {
+      blockMap[`${x},59,${z}`] = block('grass_block')
+    }
+  }
+  // 占用这块地
+  const built = [{ origin: { x: -2, y: 60, z: -2 } }]
+  
+  // 使用小半径和少尝试次数，让它尽快失败
+  const spot = findRandomBuildSpot(built, blockMap, 0, 60, 0, 5, 10)
+  // 可能找到也可能找不到（取决于随机），但大概率找不到
+  if (spot !== null) {
+    // 如果找到了，验证不重叠
+    assert(!isOverlapping(built, spot), '如果找到位置，应与已建不重叠')
+  }
+}
+
+// 场景：水面 → 找不到位置
+{
+  const blockMap = {}
+  for (let x = -10; x <= 10; x++) {
+    for (let z = -10; z <= 10; z++) {
+      blockMap[`${x},59,${z}`] = block('water')
+    }
+  }
+  const spot = findRandomBuildSpot([], blockMap, 0, 60, 0, 10, 50)
+  assert(spot === null, '全是水面 → 找不到可建造位置')
+}
+
+// 场景：水下 —— 地面正常，但屋顶上方有水
+{
+  const blockMap = {}
+  for (let x = -10; x <= 10; x++) {
+    for (let z = -10; z <= 10; z++) {
+      blockMap[`${x},59,${z}`] = block('grass_block')
+      // 屋顶上方铺水
+      blockMap[`${x},65,${z}`] = block('water')
+    }
+  }
+  const spot = findRandomBuildSpot([], blockMap, 0, 60, 0, 15, 100)
+  assert(spot === null, '水下（屋顶有水）→ 找不到可建造位置')
+}
+
+// 场景：地下/洞穴 —— 地面正常，但中心上方有连续石头天花板
+{
+  const blockMap = {}
+  for (let x = -10; x <= 10; x++) {
+    for (let z = -10; z <= 10; z++) {
+      blockMap[`${x},59,${z}`] = block('grass_block')
+    }
+  }
+  // 中心上方 (3,0,3) 覆盖连续 3 格石头
+  const cx = 3, cz = 3
+  blockMap[`${cx},65,${cz}`] = block('stone')
+  blockMap[`${cx},66,${cz}`] = block('stone')
+  blockMap[`${cx},67,${cz}`] = block('stone')
+  const spot = findRandomBuildSpot([], blockMap, 0, 60, 0, 15, 100)
+  // 注意：候选 origin 不一定恰好是 (0,60,0)，可能找到其他无覆盖位置
+  // 这里只验证如果找到了位置，它的中心上方不是连续固体
+  if (spot !== null) {
+    const scx = spot.x + Math.floor(HOUSE_W / 2)
+    const scz = spot.z + Math.floor(HOUSE_D / 2)
+    let count = 0
+    for (let dy = 5; dy <= 12; dy++) {
+      const key = `${scx},${spot.y + dy},${scz}`
+      const b = blockMap[key]
+      if (b && b.name !== 'air' && !b.name.includes('leaves')) {
+        count++
+        if (count >= 3) break
+      } else break
+    }
+    assert(count < 3, '找到的位置上方没有连续固体天花板')
+  }
+}
+
+console.log('')
+
 // ─── 结果汇总 ─────────────────────────────────
 console.log('═══════════════════════════════════════')
 console.log(`  测试结果: ${passed} 通过 / ${failed} 失败`)

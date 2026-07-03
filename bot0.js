@@ -20,10 +20,182 @@ const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 const { GoalNear } = goals
 const Vec3 = require('vec3')
 
+// ─────────────────────────────────────────────
+//  房屋追踪：持久化 + 碰撞检测 + 随机选址
+// ─────────────────────────────────────────────
+
+const HOUSE_W = 7   // 房屋 x 方向宽度
+const HOUSE_D = 7   // 房屋 z 方向深度
+const HOUSE_GAP = 1 // 房屋之间最小间隙（避免墙壁贴合）
+const MAX_HOUSES = 100
+
+// 已建房屋列表：{ origin: {x,y,z} }
+let builtHouses = []
+
+// 从 houses.json 恢复已建房屋记录
+const HOUSES_FILE = path.join(__dirname, 'houses.json')
+try {
+  if (fs.existsSync(HOUSES_FILE)) {
+    const raw = fs.readFileSync(HOUSES_FILE, 'utf-8')
+    builtHouses = JSON.parse(raw)
+    console.log(`📂 从 houses.json 恢复 ${builtHouses.length} 栋已建房屋记录`)
+  }
+} catch (e) {
+  console.log('⚠ 读取 houses.json 失败，从头开始: ' + e.message)
+  builtHouses = []
+}
+
+function saveHouses() {
+  try {
+    fs.writeFileSync(HOUSES_FILE, JSON.stringify(builtHouses, null, 2), 'utf-8')
+  } catch (e) {
+    console.log('⚠ 保存 houses.json 失败: ' + e.message)
+  }
+}
+
+/**
+ * 判断候选 origin 是否与已建房屋重叠（x-z 平面，含间隙）
+ * @param {Vec3} candOrigin 候选房屋起点
+ * @param {number} w 房屋宽度（默认 HOUSE_W）
+ * @param {number} d 房屋深度（默认 HOUSE_D）
+ * @param {number} gap 最小间隙（默认 HOUSE_GAP）
+ * @returns {boolean} true=重叠，不可建造
+ */
+function isOverlapping(candOrigin, w = HOUSE_W, d = HOUSE_D, gap = HOUSE_GAP) {
+  const candMinX = candOrigin.x
+  const candMaxX = candOrigin.x + w - 1
+  const candMinZ = candOrigin.z
+  const candMaxZ = candOrigin.z + d - 1
+
+  for (const h of builtHouses) {
+    const o = h.origin
+    const hMinX = o.x
+    const hMaxX = o.x + w - 1
+    const hMinZ = o.z
+    const hMaxZ = o.z + d - 1
+
+    // AABB 重叠检测（含间隙）：两矩形间距 < gap 则重叠
+    const overlapX = (candMinX <= hMaxX + gap) && (candMaxX + gap >= hMinX)
+    const overlapZ = (candMinZ <= hMaxZ + gap) && (candMaxZ + gap >= hMinZ)
+    if (overlapX && overlapZ) return true
+  }
+  return false
+}
+
+/**
+ * 在中心点附近随机搜索一个可建造位置
+ * @param {number} centerX 搜索中心 x
+ * @param {number} centerY 搜索中心 y（bot 脚底高度）
+ * @param {number} centerZ 搜索中心 z
+ * @param {number} radius 搜索半径（默认 150）
+ * @param {number} maxAttempts 最大尝试次数（默认 500）
+ * @returns {Vec3|null} 找到的 origin 或 null
+ */
+function findRandomBuildSpot(centerX, centerY, centerZ, radius = 150, maxAttempts = 500) {
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const angle = Math.random() * 2 * Math.PI
+    const dist = Math.sqrt(Math.random()) * radius
+    const dx = Math.round(Math.cos(angle) * dist)
+    const dz = Math.round(Math.sin(angle) * dist)
+
+    const cx = centerX + dx
+    const cz = centerZ + dz
+
+    // 向下扫描找地表：从参考高度往下找第一个固体方块，其上作为地板
+    let floorY = null
+    for (let sy = centerY + 10; sy >= centerY - 20; sy--) {
+      const b = bot.blockAt(new Vec3(cx, sy, cz))
+      if (!b || b.name === 'air' || b.name === 'water' || b.name === 'lava') continue
+      // 找到固体方块 → 地板建在它上面一层
+      floorY = sy + 1
+      // 确保 floorY 处是空气（不是嵌在山体里）
+      const above = bot.blockAt(new Vec3(cx, floorY, cz))
+      if (above && above.name !== 'air') continue
+      break
+    }
+    if (floorY == null) continue // 找不到地表
+
+    const cand = new Vec3(cx, floorY, cz)
+
+    // 碰撞检测
+    if (isOverlapping(cand)) continue
+
+    if (bot.entity && bot.blockAt) {
+      // 检查房子四角 + 中心的地面支撑
+      const corners = [
+        cand.offset(0, -1, 0),
+        cand.offset(HOUSE_W - 1, -1, 0),
+        cand.offset(0, -1, HOUSE_D - 1),
+        cand.offset(HOUSE_W - 1, -1, HOUSE_D - 1),
+        cand.offset(Math.floor(HOUSE_W / 2), -1, Math.floor(HOUSE_D / 2))
+      ]
+      let solidGround = true
+      for (const corner of corners) {
+        const block = bot.blockAt(corner)
+        if (!block || block.name === 'air') {
+          solidGround = false
+          break
+        }
+      }
+      if (!solidGround) continue
+
+      // 保护性方块检查
+      let blocked = false
+      for (let x = 0; x < HOUSE_W && !blocked; x++) {
+        for (let z = 0; z < HOUSE_D && !blocked; z++) {
+          for (let y = 0; y <= 4; y++) {
+            const block = bot.blockAt(cand.offset(x, y, z))
+            if (block && block.name === 'bedrock') {
+              blocked = true
+              break
+            }
+          }
+        }
+      }
+      if (blocked) continue
+
+      // 水下检查
+      let isUnderwater = false
+      for (let x = 0; x < HOUSE_W && !isUnderwater; x++) {
+        for (let z = 0; z < HOUSE_D && !isUnderwater; z++) {
+          const b = bot.blockAt(cand.offset(x, 5, z))
+          if (b && b.name === 'water') isUnderwater = true
+        }
+      }
+      if (isUnderwater) continue
+
+      // 嵌山检测：房子四侧外墙紧邻外部不能被自然方块包裹（石头/泥土≥3格高度）
+      const naturalBlocks = new Set(['stone','dirt','grass_block','sand','gravel','clay',
+        'andesite','diorite','granite','deepslate','tuff','moss_block','podzol','mycelium'])
+      const sides = [
+        { dx: -1, dz: 0 },  // 左墙外侧
+        { dx: HOUSE_W, dz: 0 }, // 右墙外侧
+        { dx: 0, dz: -1 },       // 前墙外侧
+        { dx: 0, dz: HOUSE_D },  // 后墙外侧
+      ]
+      let embeddedInHill = false
+      for (const { dx, dz } of sides) {
+        let naturalCount = 0
+        for (let y = 1; y <= 4; y++) {
+          const b = bot.blockAt(cand.offset(dx, y, dz))
+          if (b && naturalBlocks.has(b.name)) naturalCount++
+        }
+        if (naturalCount >= 3) { embeddedInHill = true; break }
+      }
+      if (embeddedInHill) continue
+    }
+
+    return cand
+  }
+  return null
+}
+
+// ── 全局状态：材料等待 ──
+let materialWaiter = null // { resolve, needed } 当等待用户补充材料时非空
 
 const bot = mineflayer.createBot({
   host: '192.168.1.5',//'127.0.0.1',
-  port: 61777,//65237,
+  port: 50933,//65237,
   username: 'CodexBot',
   version: '1.20.4'
 })
@@ -425,6 +597,58 @@ function verifyHouse(origin, W, D) {
 }
 
 // ─────────────────────────────────────────────
+//  材料检查与等待
+// ─────────────────────────────────────────────
+
+/**
+ * 确保背包有足够建房材料，不足则先 /give 补充，仍不够则暂停等待用户手动补充
+ */
+async function ensureMaterials() {
+  const needed = [
+    { name: 'oak_planks', count: 150 },
+    { name: 'chest', count: 1 },
+    { name: 'oak_door', count: 1 },
+    { name: 'red_bed', count: 1 },
+    { name: 'torch', count: 10 },
+  ]
+
+  // 先尝试 /give 自动补充
+  say('📦 补充材料……')
+  for (const { name, count } of needed) {
+    bot.chat(`/give ${bot.username} ${name} ${count}`)
+    await sleep(150)
+  }
+  await sleep(600) // 等物品到账
+
+  // 循环检查直到材料到位
+  while (true) {
+    const missing = []
+    for (const { name, count } of needed) {
+      const total = bot.inventory.items()
+        .filter(i => i.name === name)
+        .reduce((s, i) => s + i.count, 0)
+      if (total < count) {
+        missing.push(`${name}:${total}/${count}`)
+      }
+    }
+
+    if (missing.length === 0) {
+      say('✅ 材料齐备')
+      return
+    }
+
+    // 材料不足 → 暂停并等待用户补充
+    say(`⏸ 缺少材料: ${missing.join(', ')}`)
+    say('👉 请用 /give 补充后输入 continue 继续')
+
+    await new Promise(resolve => {
+      materialWaiter = { resolve, needed }
+    })
+    materialWaiter = null
+  }
+}
+
+// ─────────────────────────────────────────────
 //  建房主逻辑
 // ─────────────────────────────────────────────
 
@@ -434,7 +658,15 @@ async function buildHouse(origin) {
 
   say('🏗 开始建房，请稍候……')
 
-  // ── 0. 场地准备：从下往上清除障碍物（生存模式，禁用命令）──────
+  // 保护已有建筑：禁止 pathfinder 寻路时挖掘方块
+  const movements = bot.pathfinder.movements
+  const prevCanDig = movements.canDig
+  movements.canDig = false
+
+  // ── 0. 补充建房材料（自动 /give + 不够则暂停等待手动补充）──────
+  await ensureMaterials()
+
+  // ── 1. 场地准备：从下往上清除障碍物（生存模式，禁用命令）──────
   say('第零步：清理场地……')
   // 从下往上逐层清除（y=0→4），避免沙子重力坍塌填回已清区域
   for (let y = 0; y <= 4; y++) {
@@ -745,6 +977,80 @@ async function buildHouse(origin) {
   }
 
   say('🏠 房子建好了！')
+
+  // 恢复 pathfinder 挖掘权限
+  movements.canDig = prevCanDig
+}
+
+// ─────────────────────────────────────────────
+//  随机批量建房
+// ─────────────────────────────────────────────
+
+/**
+ * 在 bot 当前位置附近随机建造 count 栋不重叠的房屋
+ * @param {number} count 要建造的房屋数量（1~100）
+ * @param {number} radius 搜索半径（默认 150）
+ */
+async function buildRandomHouses(count, radius = 150) {
+  if (count <= 0) {
+    say('数量必须 ≥ 1')
+    return
+  }
+  if (count > MAX_HOUSES) {
+    say(`单次最多建造 ${MAX_HOUSES} 栋，已调整为 ${MAX_HOUSES}`)
+    count = MAX_HOUSES
+  }
+
+  const remaining = MAX_HOUSES - builtHouses.length
+  if (remaining <= 0) {
+    say(`🚫 已达到上限 ${MAX_HOUSES} 栋房子，无法再建`)
+    return
+  }
+  if (count > remaining) {
+    say(`⚠ 只剩 ${remaining} 个名额，本次只建 ${remaining} 栋`)
+    count = remaining
+  }
+
+  const p = bot.entity.position.floored()
+  say(`🎲 开始随机建房：目标 ${count} 栋，搜索半径 ${radius} 格，已建 ${builtHouses.length}/${MAX_HOUSES}`)
+
+  let built = 0
+  let failed = 0
+  const maxConsecutiveFailures = 30
+
+  for (let i = 0; i < count; i++) {
+    const spot = findRandomBuildSpot(p.x, p.y, p.z, radius, 500)
+    if (!spot) {
+      failed++
+      say(`⚠ 第 ${i + 1} 栋：找不到合适位置（已连续失败 ${failed} 次）`)
+      if (failed >= maxConsecutiveFailures) {
+        say(`🛑 连续 ${maxConsecutiveFailures} 次找不到位置，停止搜索`)
+        break
+      }
+      continue
+    }
+
+    failed = 0 // 重置连续失败计数
+    say(`🏗 第 ${built + 1}/${count} 栋 → 位置 (${spot.x}, ${spot.y}, ${spot.z})`)
+
+    try {
+      await buildHouse(spot)
+      // 建房成功，记录并保存
+      builtHouses.push({ origin: { x: spot.x, y: spot.y, z: spot.z } })
+      saveHouses()
+      built++
+      say(`✅ 第 ${built} 栋完成！总计 ${builtHouses.length}/${MAX_HOUSES}`)
+    } catch (e) {
+      say(`❌ 建房失败: ${e.message}`)
+      failed++
+    }
+  }
+
+  if (built > 0) {
+    say(`🎉 随机建房完成！本次新建 ${built} 栋，累计 ${builtHouses.length}/${MAX_HOUSES}`)
+  } else {
+    say('😞 未能建造任何房屋，请尝试调整位置或扩大搜索半径')
+  }
 }
 
 // ─────────────────────────────────────────────
@@ -781,6 +1087,13 @@ bot.once('spawn', () => {
   } else {
     say('请用 /give CodexBot oak_planks 200 等方式补充材料')
   }
+
+  // 报告已建房屋状态
+  if (builtHouses.length > 0) {
+    say(`📊 已记录 ${builtHouses.length}/${MAX_HOUSES} 栋房屋，输入 build random [数量] 随机建房`)
+  } else {
+    say('📊 暂无房屋记录，输入 build random [数量] 开始随机建房')
+  }
 })
 
 // ─────────────────────────────────────────────
@@ -792,6 +1105,31 @@ bot.on('chat', async (username, message) => {
 
   if (message === 'hello') {
     say(`你好，${username}`)
+  }
+
+  // continue —— 材料补充完毕，继续建房
+  if (message === 'continue') {
+    if (materialWaiter) {
+      // 重新检查材料
+      const missing = []
+      for (const { name, count } of materialWaiter.needed) {
+        const total = bot.inventory.items()
+          .filter(i => i.name === name)
+          .reduce((s, i) => s + i.count, 0)
+        if (total < count) {
+          missing.push(`${name}:${total}/${count}`)
+        }
+      }
+      if (missing.length === 0) {
+        say('✅ 材料齐了，继续建房！')
+        materialWaiter.resolve()
+      } else {
+        say(`⏸ 材料还不够: ${missing.join(', ')}，请继续补充后输入 continue`)
+      }
+    } else {
+      say('当前没有等待材料补充的任务')
+    }
+    return
   }
 
   if (message.startsWith('say ')) {
@@ -845,9 +1183,50 @@ bot.on('chat', async (username, message) => {
 
     try {
       await buildHouse(origin)
+      // 记录到已建列表，避免后续随机建房冲突
+      if (!builtHouses.some(h => h.origin.x === origin.x && h.origin.y === origin.y && h.origin.z === origin.z)) {
+        builtHouses.push({ origin: { x: origin.x, y: origin.y, z: origin.z } })
+        saveHouses()
+      }
     } catch (e) {
       say('建房时出错：' + e.message)
       console.error(e)
+    }
+  }
+
+  // build random [count] —— 在当前位置附近随机建造不重叠的房屋
+  if (message === 'build random' || message.startsWith('build random ')) {
+    const parts = message.trim().split(/\s+/)
+    let count = 1 // 默认 1 栋
+    if (parts.length >= 3) {
+      count = parseInt(parts[2], 10)
+      if (isNaN(count) || count < 1) {
+        say('数量格式错误，用法：build random [数量]')
+        return
+      }
+    }
+
+    try {
+      await buildRandomHouses(count)
+    } catch (e) {
+      say('随机建房时出错：' + e.message)
+      console.error(e)
+    }
+  }
+
+  if (message === 'houses' || message === 'house list') {
+    if (builtHouses.length === 0) {
+      say('📊 暂无已建房屋记录')
+    } else {
+      say(`📊 已建房屋 ${builtHouses.length}/${MAX_HOUSES}：`)
+      // 最近 10 栋
+      const recent = builtHouses.slice(-10)
+      for (const h of recent) {
+        say(`  (${h.origin.x}, ${h.origin.y}, ${h.origin.z})`)
+      }
+      if (builtHouses.length > 10) {
+        say(`  ... 还有 ${builtHouses.length - 10} 栋`)
+      }
     }
   }
 

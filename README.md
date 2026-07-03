@@ -1,55 +1,153 @@
-# Init
-MC:1.20.4
-node -v
-v18.18.0
+# mc-bot —— Minecraft 自动建房机器人
 
-mkdir mc-bot
-cd mc-bot
+基于 [mineflayer](https://github.com/PrismarineJS/mineflayer) 的 Minecraft 1.20.4 自动建房 bot。支持手动指定位置建房和随机批量建房，最多 100 栋不重叠房屋。
 
-# Packages
+## 环境要求
+
+- Minecraft 服务端 1.20.4（建议开启作弊以使用 `/give` 自动补材料）
+- Node.js ≥ 18.18.0
+
+## 快速开始
+
+```bash
+# 1. 安装依赖
 npm install mineflayer
 npm install mineflayer-pathfinder
-npm install mineflayer-collectblock
-npm install mineflayer-tool
-npm install mineflayer-crafting-util
-npm install mineflayer-pvp
 npm install vec3
 npm install minecraft-data
 
+# 2. 启动 Minecraft 服务器（版本 1.20.4，开启作弊）
 
-# Run
+# 3. 启动 bot
+node bot0.js
 
-安装所有依赖包
+# 4. 在服务器控制台给 bot 准备初始材料
+/give CodexBot oak_planks 200
+/give CodexBot oak_door 2
+/give CodexBot chest 2
+/give CodexBot red_bed 2
+/give CodexBot torch 16
 
-启动Minecraft服务器（版本1.20.4）
+# 5. 进入游戏，在聊天栏输入命令即可
+```
 
-运行 node bot.js
+## 文件说明
 
-在游戏中输入命令：
+| 文件 | 说明 |
+|---|---|
+| `bot.js` | 基础版 —— 单栋建房、采集、合成 |
+| `bot0.js` | 增强版 —— 批量随机建房、材料管理、持久化记录 |
+| `test_bot0.js` | 核心逻辑单元测试（运行 `node test_bot0.js`） |
+| `houses.json` | 已建房屋记录（自动生成，重启后继承） |
+| `bot0.log` | 运行日志（自动追加） |
 
-build house - 在当前脚下建房
+---
 
-build house x y z - 在指定位置建房
+## bot0.js 命令参考
 
-inv - 查看背包
+### 建房命令
 
-collect wood - 手动采集木头
+| 命令 | 说明 |
+|---|---|
+| `build house` | 在脚下建一栋 7×7 标准房屋 |
+| `build house x y z` | 在指定坐标建一栋 |
+| `build random` | 在周围随机建 1 栋（自动找空地，不重叠） |
+| `build random 5` | 随机建 5 栋 |
+| `build random 100` | 建满上限 100 栋 |
 
-craft planks - 手动合成木板
+### 查询命令
 
-## 
+| 命令 | 说明 |
+|---|---|
+| `inv` | 查看背包物品及数量 |
+| `houses` / `house list` | 已建房屋列表（最近 10 栋 + 总数） |
+| `pos` / `where` | bot 当前坐标 |
 
-/give CodexBot oak_planks 64
-/give CodexBot oak_planks 64
-/give CodexBot oak_planks 64
-/give CodexBot oak_door 64
-/give CodexBot chest 64
-/give CodexBot red_bed 64
+### 移动 & 交互
 
-## codewhale
-node -v
-v22.19.0
-npm install -g codewhale --verbose
-codewhale auth set --provider deepseek
-Enter API key for deepseek: sk-********
-saved API key for deepseek to /Users/****/.codewhale/config.toml and file-based (~/.codewhale/secrets/)
+| 命令 | 说明 |
+|---|---|
+| `come` | bot 走到你身边 |
+| `stop` | 立即停止移动 |
+| `say <文字>` | bot 语音播报文字 |
+| `hello` | 打招呼 |
+| `test` | 验证脚下房屋结构完整性 |
+| `continue` | 材料补齐后继续被暂停的建房任务 |
+
+---
+
+## 随机建房智能特性
+
+### 自动地表扫描
+bot 在随机选址时会**向下扫描找到真实地表**，不是简单随机 y 坐标。建房地板的 y 坐标由该位置的实际地形决定，确保房子不会建在地下、洞穴或山体内部。
+
+### 选址过滤规则
+每次随机选址自动过滤以下位置，找不到合适位置会重试（最多 500 次）：
+
+- ❌ 与已有房屋重叠（7×7 占地 + 1 格间隙）
+- ❌ 地面为空气、水或熔岩（需要实心地面支撑）
+- ❌ 屋顶正上方有水覆盖（水下）
+- ❌ 房子四侧外墙被山体包裹（嵌山/洞穴）
+- ❌ 选址范围内有基岩
+
+### 保护已有建筑
+建房期间 pathfinder 寻路不会挖掘方块，bot 穿过已有房屋时会绕行，不会破坏墙、门、床等结构。
+
+### 搜索范围
+以 bot 当前位置为中心，**半径 150 格**内随机选址。房子分布均匀（面积加权随机），不会挤在中心。
+
+---
+
+## 材料管理
+
+每栋房子需要以下材料，bot 在每次建房前自动处理：
+
+| 材料 | 每栋用量 |
+|---|---|
+| `oak_planks` | 150 |
+| `chest` | 1 |
+| `oak_door` | 1 |
+| `red_bed` | 1 |
+| `torch` | 10 |
+
+### 自动补充流程
+
+1. bot 先通过 `/give` 命令给自己补充材料
+2. 等待 600ms 后检查背包实际数量
+3. **材料齐** → 直接开工
+4. **材料不足** → 暂停，聊天提示缺失物品及数量，等待用户手动 `/give` 后输入 `continue` 继续
+
+> 如果服务器未开启作弊，`/give` 命令无效，bot 会直接走到第 4 步等待手动补充。
+
+---
+
+## 房屋规格
+
+- 尺寸：7×7×5（占地 7×7，高 4 格墙体 + 1 格屋顶）
+- 结构：橡木地板、四面橡木墙（前墙留门洞）、橡木屋顶
+- 内饰：门、床、箱子、火把（内外各 4 个）
+- 建房后自动验证：地板、墙壁、门、屋顶、床、箱子全部到位才算通过
+
+## 持久化
+
+- 每建完一栋房自动写入 `houses.json`
+- bot 重启后自动读取，已建房屋仍然被碰撞检测保护
+- 上限 100 栋，达到上限后 `build random` 和 `build house` 都不会再增加
+
+## 单元测试
+
+```bash
+node test_bot0.js
+```
+
+覆盖核心逻辑：物品查找、房屋验证、蛇形铺设、碰撞检测、随机选址过滤、地下/水下排除等。
+
+---
+
+## 原始环境记录
+
+```
+MC: 1.20.4
+node: v18.18.0
+codewhale: v22.19.0
+```
