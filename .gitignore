@@ -2,3 +2,8 @@ node_modules/
 *.log
 *.txt
 temp
+.codewhale/
+houses.json
+center.json
+.agents
+AGENTS.md

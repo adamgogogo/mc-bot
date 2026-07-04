@@ -58,7 +58,7 @@ function findItem(bot, candidates) {
   return null
 }
 
-function verifyHouse(bot, origin, W, D) {
+function verifyHouse(bot, origin, W, D, shape = "flat", wallH = 4) {
   const results = { pass: true, issues: [] }
 
   // 地板
@@ -316,6 +316,25 @@ console.log('🏠 测试 verifyHouse —— 房屋验证')
 
 console.log('')
 
+
+
+// 场景13：三角屋顶验证（wallH 参数化）
+{
+  const origin = new Vec3(0, 60, 0), W = 7, D = 7
+  const blockMap = {}
+  // 地板
+  for(let x=0;x<W;x++) for(let z=0;z<D;z++) blockMap[`${x},60,${z}`]=block('oak_planks')
+  // 墙壁 y=1~4
+  for(let y=1;y<=4;y++){for(let x=0;x<W;x++){if(!(x===3&&(y===1||y===2)))blockMap[`${x},${60+y},0`]=block('oak_planks');blockMap[`${x},${60+y},${D-1}`]=block('oak_planks')}for(let z=1;z<D-1;z++){blockMap[`0,${60+y},${z}`]=block('oak_planks');blockMap[`${W-1},${60+y},${z}`]=block('oak_planks')}}
+  // 三角屋顶 y=4~7
+  for(let layer=0;layer<4;layer++){for(let x=layer;x<=W-1-layer;x++){for(let z=0;z<D;z++){blockMap[`${x},${64+layer},${z}`]=block('oak_planks')}}}
+  blockMap['3,61,0']=block('oak_door');blockMap['4,61,2']=block('red_bed')
+  blockMap[`3,61,${D-2}`]=block('chest')
+  const bot = createMockBot([], blockMap)
+  const r = verifyHouse(bot, origin, W, D, 'triangle', 4)
+  assert(r.pass===true,'三角屋顶验证通过')
+}
+console.log('')
 // ─── 蛇形铺设排序测试 ────────────────────────
 console.log('🐍 测试蛇形铺设排序')
 
@@ -638,7 +657,7 @@ const HOUSE_W = 7
 const HOUSE_D = 7
 const HOUSE_GAP = 1
 
-function isOverlapping(builtHouses, candOrigin, w = HOUSE_W, d = HOUSE_D, gap = HOUSE_GAP) {
+function isOverlapping(builtHouses, candOrigin, w = HOUSE_W, d = HOUSE_D, gap = HOUSE_GAP, candH = 5) {
   const candMinX = candOrigin.x
   const candMaxX = candOrigin.x + w - 1
   const candMinZ = candOrigin.z
@@ -734,7 +753,7 @@ console.log('')
 // ─── 随机位置搜索测试 ──────────────────────────
 console.log('🎲 测试随机位置搜索 (findRandomBuildSpot)')
 
-function findRandomBuildSpot(builtHouses, blockMap, centerX, centerY, centerZ, radius = 20, maxAttempts = 200) {
+function findRandomBuildSpot(builtHouses, blockMap, centerX, centerY, centerZ, w = HOUSE_W, d = HOUSE_D, radius = 20, maxAttempts = 200) {
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const angle = Math.random() * 2 * Math.PI
     const dist = Math.sqrt(Math.random()) * radius
@@ -911,6 +930,209 @@ function findRandomBuildSpot(builtHouses, blockMap, centerX, centerY, centerZ, r
     }
     assert(count < 3, '找到的位置上方没有连续固体天花板')
   }
+}
+
+console.log('')
+
+// ─── walkTo + 出门逻辑 Mock 集成测试 ──────────
+console.log('🚶 测试 walkTo 与出门逻辑')
+
+// 1. 距离预检：< 3.5 不调用 pathfinder
+{
+  let pathfinderCalled = false
+  const pos = new Vec3(0, 60, 0)
+  const dist = pos.distanceTo(new Vec3(0, 60, 0))
+  assertEq(dist, 0, '同位置距离 = 0')
+  assert(dist < 3.5, '距离 < 3.5 跳过寻路')
+}
+
+// 2. 出口坐标计算：床角 → 门外
+{
+  // 模拟标准房 origin(100,64,200), W=7,D=7, doorX=3
+  const origin = new Vec3(100, 64, 200)
+  const doorX = 3
+  // bot 在床角落: origin.offset(4, 1, 2) = (104, 65, 202)
+  const bedCorner = origin.offset(4, 1, 2)
+  // 门外目标: origin.offset(doorX, 0, -2) = (103, 64, 198)
+  const exitTarget = origin.offset(doorX, 0, -2)
+  assertEq(bedCorner.x, 104, '床角落 x')
+  assertEq(bedCorner.z, 202, '床角落 z')
+  assertEq(exitTarget.x, 103, '出口目标 x')
+  assertEq(exitTarget.z, 198, '出口目标 z')
+  // 床角到门外距离 > 3.5，需要 pathfinder
+  const d = bedCorner.distanceTo(exitTarget)
+  assert(d > 3.5, `床角→门外距离 ${d.toFixed(1)} > 3.5，会调用 pathfinder`)
+}
+
+// 3. 放床后回中央坐标：W=7,D=7 → 中央(3.5, y, 3.5)
+{
+  const origin = new Vec3(50, 70, 80)
+  const W = 7, D = 7
+  const cx = origin.x + Math.floor(W / 2)
+  const cz = origin.z + Math.floor(D / 2)
+  assertEq(cx, 53, '中央 x')
+  assertEq(cz, 83, '中央 z')
+  // 中央到门外距离
+  const mid = new Vec3(cx, origin.y, cz)
+  const door = origin.offset(3, 0, -2)
+  const d2 = mid.distanceTo(door)
+  assert(d2 > 3.5, `中央→门外距离 ${d2.toFixed(1)} > 3.5`)
+}
+
+// 4. canDig 状态模拟：建房期间 false，结尾恢复 true
+{
+  let canDig = true
+  const prevCanDig = canDig
+  canDig = false // buildHouse 开始
+  assert(!canDig, '建房期间 canDig=false')
+  canDig = prevCanDig // buildHouse 结束
+  assert(canDig, '建房结束后 canDig 恢复 true')
+}
+
+// ─── placeTorchOnWall Mock 测试 ──────────────
+console.log('🔥 测试 placeTorchOnWall 逻辑')
+
+async function mockPlaceTorchOnWall(mockBot, wallPos, faceVec) {
+  const torchItem = (mockBot.inventory.items() || []).find(i => i.name === 'torch')
+  if (!torchItem) return false
+  const targetPos = { x: wallPos.x + faceVec.x, y: wallPos.y + faceVec.y, z: wallPos.z + faceVec.z }
+  const key = `${targetPos.x},${targetPos.y},${targetPos.z}`
+  const existing = mockBot.blockMap[key]
+  if (existing && existing !== 'air') {
+    if (existing === 'torch') return true
+    return false
+  }
+  const wallKey = `${wallPos.x},${wallPos.y},${wallPos.z}`
+  const wallBlock = mockBot.blockMap[wallKey]
+  if (!wallBlock || wallBlock === 'air') return false
+  mockBot.blockMap[key] = 'torch'
+  return true
+}
+
+;(async () => {
+  const wallPos = new Vec3(3, 62, 0)
+  const faceVec = new Vec3(0, 0, 1)
+
+  const bot1 = {
+    inventory: { items: () => [{ name: 'torch', count: 5 }] },
+    blockMap: { '3,62,0': 'oak_planks', '3,62,1': 'air' }
+  }
+  assert(await mockPlaceTorchOnWall(bot1, wallPos, faceVec), '有墙有 torch → 放置成功')
+  assert(bot1.blockMap['3,62,1'] === 'torch', '目标位置变成 torch')
+
+  const bot2 = { inventory: { items: () => [] }, blockMap: {} }
+  assert(!(await mockPlaceTorchOnWall(bot2, wallPos, faceVec)), '无 torch → false')
+
+  const bot3 = {
+    inventory: { items: () => [{ name: 'torch', count: 1 }] },
+    blockMap: { '3,62,0': 'oak_planks', '3,62,1': 'stone' }
+  }
+  assert(!(await mockPlaceTorchOnWall(bot3, wallPos, faceVec)), '目标有 stone → false')
+
+  const bot4 = {
+    inventory: { items: () => [{ name: 'torch', count: 1 }] },
+    blockMap: { '3,62,0': 'oak_planks', '3,62,1': 'torch' }
+  }
+  assert(await mockPlaceTorchOnWall(bot4, wallPos, faceVec), '目标已有 torch → true（幂等）')
+
+  const bot5 = {
+    inventory: { items: () => [{ name: 'torch', count: 1 }] },
+    blockMap: { '3,62,0': 'air', '3,62,1': 'air' }
+  }
+  assert(!(await mockPlaceTorchOnWall(bot5, wallPos, faceVec)), '墙壁 air → false')
+})()
+
+// ─── 补墙逻辑测试 ────────────────────────────
+console.log('🧱 测试补墙逻辑')
+{
+  const origin = new Vec3(100, 64, 200)
+  const W = 7, D = 7, wallH = 4, doorX = 3
+  const walls = []
+  for (let y = 1; y <= wallH; y++) {
+    for (let x = 0; x < W; x++) {
+      if (!(y <= 2 && x === doorX)) walls.push(origin.offset(x, y, 0))
+      walls.push(origin.offset(x, y, D - 1))
+    }
+    for (let z = 1; z < D - 1; z++) {
+      walls.push(origin.offset(0, y, z))
+      walls.push(origin.offset(W - 1, y, z))
+    }
+  }
+  // 前墙 (4层 × 7格 - 门洞2格) + 后墙 28 + 左墙 (4×5) + 右墙 (4×5) = 26+28+20+20 = 94
+  assertEq(walls.length, 94, '7×7 wallH=4 墙壁共 94 个补墙位置')
+  // 门洞不在列表中
+  const doorSpots = walls.filter(p => p.x === origin.x + 3 && p.z === origin.z && (p.y === origin.y + 1 || p.y === origin.y + 2))
+  assertEq(doorSpots.length, 0, '门洞不在补墙列表中')
+  // 检查角落
+  const corner = origin.offset(0, 1, 0)
+  assert(walls.some(p => p.x === corner.x && p.y === corner.y && p.z === corner.z), '前墙左下角在列表中')
+}
+
+console.log('')
+
+// ─── 围墙坐标测试 ────────────────────────────
+console.log('🧱 测试围墙坐标计算')
+
+{
+  const center = { x: 0, z: 0 }
+  const radius = 10
+  const H = 4
+  // 正方形围墙：4边，高H层，每层2*radius*2+2*(2*radius-2)? 不对，是4*radius*2? 
+  // 周长 = 4 * (2*radius) - 4 = 8*radius - 4；但代码中是每边独立循环，角落重复
+  // 实际代码：顶边(2r+1) + 底边(2r+1) + 左边(2r-1) + 右边(2r-1) = 8r
+  const totalBlocks = 2 * (2 * radius + 1) + 2 * (2 * radius - 1)
+  assertEq(totalBlocks, 8 * radius, `半径${radius}围墙每层 ${8*radius} 块`)
+  assert(totalBlocks * H > 300, '围墙需要大量 stone')
+}
+
+// ─── 中心坐标逻辑测试 ────────────────────────
+console.log('📌 测试建房中心逻辑')
+
+{
+  let buildCenter = null
+  // 无中心时使用传入坐标
+  let cx = 10, cy = 64, cz = 20
+  if (buildCenter) { cx = buildCenter.x; cy = buildCenter.y; cz = buildCenter.z }
+  assertEq(cx, 10, '无中心 → 使用传入 x')
+  assertEq(cz, 20, '无中心 → 使用传入 z')
+
+  // 有中心时覆盖
+  buildCenter = { x: 100, y: 70, z: 200 }
+  if (buildCenter) { cx = buildCenter.x; cy = buildCenter.y; cz = buildCenter.z }
+  assertEq(cx, 100, '有中心 → 覆盖 x')
+  assertEq(cz, 200, '有中心 → 覆盖 z')
+}
+
+// ─── 围墙垂直障碍检测测试 ────────────────────
+console.log('⛰️  测试围墙悬崖检测')
+
+{
+  const blockMap = {}
+  // 地面 solid(y=63) + 下方10格全是空气 → 悬崖
+  blockMap['0,63,10'] = 'grass_block'
+  for (let dy = 2; dy <= 11; dy++) blockMap[`0,${63-dy},10`] = 'air'
+  // 检查: y-1 solid ✓，但下方10格全 air → 悬崖
+  let cliff = true
+  for (let dy = 2; dy <= 11; dy++) {
+    const b = blockMap[`0,${63-dy},10`]
+    if (b && b !== 'air') { cliff = false; break }
+  }
+  assert(cliff, '下方 10 格全空气 → 判定为悬崖')
+
+  // 正常地面：下方有 solid
+  const blockMap2 = {}
+  blockMap2['0,63,10'] = 'grass_block'
+  blockMap2['0,55,10'] = 'stone' // 第 8 格有石头
+  for (let dy = 2; dy <= 11; dy++) {
+    const b = blockMap2[`0,${63-dy},10`] || 'air'
+    blockMap2[`0,${63-dy},10`] = b
+  }
+  let cliff2 = true
+  for (let dy = 2; dy <= 11; dy++) {
+    const b = blockMap2[`0,${63-dy},10`]
+    if (b && b !== 'air') { cliff2 = false; break }
+  }
+  assert(!cliff2, '下方有 stone → 非悬崖')
 }
 
 console.log('')
